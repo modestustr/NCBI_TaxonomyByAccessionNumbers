@@ -372,7 +372,7 @@ if uploaded_file:
                 st.write("**Temizlenmiş Sütun İsimleri:**")
                 st.code(", ".join(all_columns))
             
-            st.dataframe(df_original.head(10), use_container_width=True)
+            st.dataframe(df_original.head(10), width='stretch')
 
         # --- COLUMN MAPPING SECTION ---
         st.subheader("🛠️ Sütunları Tanımlayın")
@@ -456,16 +456,16 @@ if uploaded_file:
                     if 'phylum' in df_final.columns:
                         phylum_counts = df_final['phylum'].value_counts()
                         st.write("**Phylum (Şube) Dağılımı:**")
-                        st.dataframe(phylum_counts, use_container_width=True)
+                        st.dataframe(phylum_counts, width='stretch')
                 
                 with summary_col2:
                     if 'class' in df_final.columns:
                         class_counts = df_final['class'].value_counts()
                         st.write("**Class (Sınıf) Dağılımı:**")
-                        st.dataframe(class_counts, use_container_width=True)
+                        st.dataframe(class_counts, width='stretch')
 
                 st.subheader("🏁 Sonuç Tablosu (İlk 20 Satır)")
-                st.dataframe(df_final.head(20), use_container_width=True)
+                st.dataframe(df_final.head(20), width='stretch')
                 
                 # Download results
                 output = io.BytesIO()
