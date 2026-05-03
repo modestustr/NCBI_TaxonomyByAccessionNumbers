@@ -1,0 +1,48 @@
+{
+  "app": {
+    "page_title": "eDNA Taxonomy Tool",
+    "title": "🧬 eDNA Accession Numaralarına Göre Taksonomi Eşleştirici",
+    "api_key_found": "✅ NCBI API Anahtarı Aktif: {0}***",
+    "api_key_not_found": "⚠️ NCBI Anahtarı bulunamadı. Sorgu hızı kısıtlı olacaktır.",
+    "log_started": "Streamlit uygulaması başlatıldı"
+  },
+  "upload": {
+    "label": "Blast Sonuç Dosyasını Seçin (Excel .xlsx)",
+    "file_loaded": "Dosya yüklendi: {0}",
+    "file_info_title": "Veri Özeti:",
+    "total_rows": "- Toplam Satır: `{0}`",
+    "total_columns": "- Toplam Sütun: `{0}`",
+    "column_names": "Temizlenmiş Sütun İsimleri:",
+    "preview": "📂 Yüklenen Dosya Önizlemesi ve Sütun Kontrolü"
+  },
+  "column_mapping": {
+    "title": "🛠️ Sütunları Tanımlayın",
+    "info": "Eğer sistem sütunlarınızı otomatik tanıyamadıysa, lütfen aşağıdan doğru sütunları seçin.",
+    "accession_label": "Accession Numarası Sütunu:",
+    "name_label": "Scientific Name (Tür Adı) Sütunu:"
+  },
+  "processing": {
+    "start_button": "🚀 Analizi Başlat",
+    "status_title": "🔎 İşlem Durumu",
+    "processing_text": "İşleniyor ({0}/{1}): {2}",
+    "completed": "✅ Tüm veriler başarıyla eşleştirildi!",
+    "unique_entries": "İşleniyor {0} benzersiz giriş",
+    "success_log": "Analiz başarıyla tamamlandı"
+  },
+  "summary": {
+    "title": "📊 Taksonomik Dağılım Özeti",
+    "phylum_distribution": "**Phylum (Şube) Dağılımı:**",
+    "class_distribution": "**Class (Sınıf) Dağılımı:**"
+  },
+  "results": {
+    "results_table": "🏁 Sonuç Tablosu (İlk 20 Satır)",
+    "download_button": "📥 Sonuçları Excel Olarak İndir",
+    "download_filename": "eDNA_Taxonomy_Result.xlsx"
+  },
+  "errors": {
+    "parse_error": "❌ Excel dosyası okunamadı. Dosya formatını kontrol edin.",
+    "unexpected_error": "❌ Beklenmeyen hata: {0}",
+    "analysis_error": "❌ Hata oluştu: {0}",
+    "check_logs": "Lütfen log dosyasını kontrol edin: logs/taxonomy_app.log"
+  }
+}

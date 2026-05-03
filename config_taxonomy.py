@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Optional
 
 # --- API CONFIGURATION ---
-NCBI_API_KEY_PATH: str = os.getenv("NCBI_KEY_PATH", "D:/Uysal/ncbi_key.txt")
+# NCBI API key file path (in same directory as this config file)
+NCBI_API_KEY_PATH: str = os.path.join(os.path.dirname(__file__), "ncbi_key.txt")
 NCBI_API_TIMEOUT: int = 15
 NCBI_ENDPOINTS: dict = {
     "esearch": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
@@ -33,10 +34,8 @@ CACHE_MAX_SIZE: int = 1000
 
 
 def get_ncbi_api_key() -> Optional[str]:
-    """Load NCBI API key from environment or config file."""
+    """Load NCBI API key from ncbi_key.txt file."""
     try:
-        if not Path(NCBI_API_KEY_PATH).exists():
-            return None
         with open(NCBI_API_KEY_PATH, "r") as f:
             key = f.read().strip()
             return key if key else None

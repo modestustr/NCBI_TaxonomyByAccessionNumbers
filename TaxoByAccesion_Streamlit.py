@@ -17,6 +17,9 @@ from config_taxonomy import (
     LOG_LEVEL, LOG_FILE, ENABLE_CACHE
 )
 
+# Import translation system
+from translations import initialize_translator, get_translator, set_language
+
 # --- LOGGING SETUP ---
 os.makedirs(os.path.dirname(LOG_FILE) if os.path.dirname(LOG_FILE) else ".", exist_ok=True)
 logging.basicConfig(
@@ -332,24 +335,56 @@ def process_entry(entry: Tuple[str, str, int, int]) -> Dict[str, Any]:
     return result
 
 # --- STREAMLIT UI ---
+# Initialize translator
+translator = initialize_translator()
+
+# Set up Streamlit page config
 st.set_page_config(page_title="eDNA Taxonomy Tool", layout="wide")
 
-st.title("🧬 eDNA Accession Numaralarına Göre Taksonomi Eşleştirici")
+# Initialize language in session state
+if "language" not in st.session_state:
+    st.session_state.language = "tr"
+
+# Language selector in sidebar
+with st.sidebar:
+    st.markdown("### 🌐 Dil / Language")
+    language_options = translator.get_all_languages()
+    selected_lang = st.selectbox(
+        "Select Language / Dili Seçin",
+        options=list(language_options.keys()),
+        format_func=lambda x: language_options[x],
+        index=0 if st.session_state.language == "tr" else 1,
+        key="lang_selector"
+    )
+    
+    # Update language if changed
+    if selected_lang != st.session_state.language:
+        st.session_state.language = selected_lang
+        set_language(selected_lang)
+        st.rerun()
+    else:
+        set_language(st.session_state.language)
+
+# Get translator for easier access
+t = get_translator()
+
+# Set page title and main title
+st.title(t.t("app.title"))
 st.markdown("---")
 
 # Log application start
-logger.info("=== Streamlit application started ===")
+logger.info(t.t("app.log_started"))
 
 # Show API key status
 if NCBI_API_KEY:
-    st.success(f"✅ NCBI API Anahtarı Aktif: {NCBI_API_KEY[:5]}***")
+    st.success(t.t("app.api_key_found", NCBI_API_KEY[:5]))
     logger.info("NCBI API key loaded successfully")
 else:
-    st.warning("⚠️ NCBI Anahtarı bulunamadı. Sorgu hızı kısıtlı olacaktır.")
+    st.warning(t.t("app.api_key_not_found"))
     logger.warning("NCBI API key not found - rate limiting will apply")
 
 # File upload
-uploaded_file = st.file_uploader("Blast Sonuç Dosyasını Seçin (Excel .xlsx)", type=["xlsx"])
+uploaded_file = st.file_uploader(t.t("upload.label"), type=["xlsx"])
 
 if uploaded_file:
     try:
@@ -362,21 +397,21 @@ if uploaded_file:
         
         logger.info(f"File loaded: {len(df_original)} rows, {len(df_original.columns)} columns")
         
-        with st.expander("📂 Yüklenen Dosya Önizlemesi ve Sütun Kontrolü", expanded=True):
+        with st.expander(t.t("upload.preview"), expanded=True):
             col_info1, col_info2 = st.columns([1, 2])
             with col_info1:
-                st.write("**Veri Özeti:**")
-                st.write(f"- Toplam Satır: `{len(df_original)}`")
-                st.write(f"- Toplam Sütun: `{len(df_original.columns)}`")
+                st.write(f"**{t.t('upload.file_info_title')}**")
+                st.write(t.t("upload.total_rows", len(df_original)))
+                st.write(t.t("upload.total_columns", len(df_original.columns)))
             with col_info2:
-                st.write("**Temizlenmiş Sütun İsimleri:**")
+                st.write(f"**{t.t('upload.column_names')}**")
                 st.code(", ".join(all_columns))
             
             st.dataframe(df_original.head(10), width='stretch')
 
         # --- COLUMN MAPPING SECTION ---
-        st.subheader("🛠️ Sütunları Tanımlayın")
-        st.info("Eğer sistem sütunlarınızı otomatik tanıyamadıysa, lütfen aşağıdan doğru sütunları seçin.")
+        st.subheader(t.t("column_mapping.title"))
+        st.info(t.t("column_mapping.info"))
         
         target_acc = "Accession"
         target_name = "scientific_name_original"
@@ -388,12 +423,12 @@ if uploaded_file:
         def_name_idx = all_columns.index(target_name) if target_name in all_columns else (1 if len(all_columns) > 1 else 0)
         
         with col_sel1:
-            selected_acc_col = st.selectbox("Accession Numarası Sütunu:", options=all_columns, index=def_acc_idx)
+            selected_acc_col = st.selectbox(t.t("column_mapping.accession_label"), options=all_columns, index=def_acc_idx)
         with col_sel2:
-            selected_name_col = st.selectbox("Scientific Name (Tür Adı) Sütunu:", options=all_columns, index=def_name_idx)
+            selected_name_col = st.selectbox(t.t("column_mapping.name_label"), options=all_columns, index=def_name_idx)
 
         # Start processing
-        if st.button("🚀 Analizi Başlat"):
+        if st.button(t.t("processing.start_button")):
             logger.info(f"Starting analysis with columns: {selected_acc_col}, {selected_name_col}")
             
             try:
@@ -406,9 +441,9 @@ if uploaded_file:
                 unique_entries = df_working[['Accession', 'scientific_name_original']].drop_duplicates()
                 total_unique = len(unique_entries)
                 
-                logger.info(f"Processing {total_unique} unique entries")
+                logger.info(t.t("processing.unique_entries", total_unique))
                 
-                st.markdown("### 🔎 İşlem Durumu")
+                st.markdown(f"### {t.t('processing.status_title')}")
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 
@@ -430,10 +465,10 @@ if uploaded_file:
                         results.append(result)
                         counter += 1
                         current_name = result.get('scientific_name_original', 'Bilinmiyor')
-                        status_text.text(f"İşleniyor ({counter}/{total_unique}): {current_name}")
+                        status_text.text(t.t("processing.processing_text", counter, total_unique, current_name))
                         progress_bar.progress(counter / total_unique)
                 
-                logger.info(f"Successfully processed {counter} entries")
+                logger.info(t.t("processing.success_log"))
                 
                 # Merge results
                 df_lookup = pd.DataFrame(results)
@@ -445,26 +480,26 @@ if uploaded_file:
                 )
                 
                 st.balloons()
-                st.success("✅ Tüm veriler başarıyla eşleştirildi!")
+                st.success(t.t("processing.completed"))
                 
                 # Summary Report
                 st.markdown("---")
-                st.subheader("📊 Taksonomik Dağılım Özeti")
+                st.subheader(t.t("summary.title"))
                 summary_col1, summary_col2 = st.columns(2)
                 
                 with summary_col1:
                     if 'phylum' in df_final.columns:
                         phylum_counts = df_final['phylum'].value_counts()
-                        st.write("**Phylum (Şube) Dağılımı:**")
+                        st.write(t.t("summary.phylum_distribution"))
                         st.dataframe(phylum_counts, width='stretch')
                 
                 with summary_col2:
                     if 'class' in df_final.columns:
                         class_counts = df_final['class'].value_counts()
-                        st.write("**Class (Sınıf) Dağılımı:**")
+                        st.write(t.t("summary.class_distribution"))
                         st.dataframe(class_counts, width='stretch')
 
-                st.subheader("🏁 Sonuç Tablosu (İlk 20 Satır)")
+                st.subheader(t.t("results.results_table"))
                 st.dataframe(df_final.head(20), width='stretch')
                 
                 # Download results
@@ -474,9 +509,9 @@ if uploaded_file:
                 processed_data = output.getvalue()
                 
                 st.download_button(
-                    label="📥 Sonuçları Excel Olarak İndir",
+                    label=t.t("results.download_button"),
                     data=processed_data,
-                    file_name="eDNA_Taxonomy_Result.xlsx",
+                    file_name=t.t("results.download_filename"),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
                 
@@ -484,12 +519,12 @@ if uploaded_file:
                 
             except Exception as e:
                 logger.error(f"Error during analysis: {str(e)}", exc_info=True)
-                st.error(f"❌ Hata oluştu: {str(e)}")
-                st.error("Lütfen log dosyasını kontrol edin: logs/taxonomy_app.log")
+                st.error(t.t("errors.analysis_error", str(e)))
+                st.error(t.t("errors.check_logs"))
     
     except pd.errors.ParserError as e:
         logger.error(f"Excel parse error: {str(e)}")
-        st.error("❌ Excel dosyası okunamadı. Dosya formatını kontrol edin.")
+        st.error(t.t("errors.parse_error"))
     except Exception as e:
         logger.error(f"Unexpected error during file processing: {str(e)}", exc_info=True)
-        st.error(f"❌ Beklenmeyen hata: {str(e)}")
+        st.error(t.t("errors.unexpected_error", str(e)))

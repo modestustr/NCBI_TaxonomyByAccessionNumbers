@@ -1,0 +1,48 @@
+{
+  "app": {
+    "page_title": "eDNA Taxonomy Tool",
+    "title": "🧬 eDNA Taxonomy Matcher by Accession Numbers",
+    "api_key_found": "✅ NCBI API Key Active: {0}***",
+    "api_key_not_found": "⚠️ NCBI API Key not found. Query rate will be limited.",
+    "log_started": "Streamlit application started"
+  },
+  "upload": {
+    "label": "Select BLAST Result File (Excel .xlsx)",
+    "file_loaded": "File uploaded: {0}",
+    "file_info_title": "Data Summary:",
+    "total_rows": "- Total Rows: `{0}`",
+    "total_columns": "- Total Columns: `{0}`",
+    "column_names": "Cleaned Column Names:",
+    "preview": "📂 Uploaded File Preview and Column Check"
+  },
+  "column_mapping": {
+    "title": "🛠️ Define Columns",
+    "info": "If the system could not auto-detect your columns, please select the correct columns below.",
+    "accession_label": "Accession Number Column:",
+    "name_label": "Scientific Name Column:"
+  },
+  "processing": {
+    "start_button": "🚀 Start Analysis",
+    "status_title": "🔎 Processing Status",
+    "processing_text": "Processing ({0}/{1}): {2}",
+    "completed": "✅ All data successfully matched!",
+    "unique_entries": "Processing {0} unique entries",
+    "success_log": "Analysis completed successfully"
+  },
+  "summary": {
+    "title": "📊 Taxonomic Distribution Summary",
+    "phylum_distribution": "**Phylum Distribution:**",
+    "class_distribution": "**Class Distribution:**"
+  },
+  "results": {
+    "results_table": "🏁 Result Table (First 20 Rows)",
+    "download_button": "📥 Download Results as Excel",
+    "download_filename": "eDNA_Taxonomy_Result.xlsx"
+  },
+  "errors": {
+    "parse_error": "❌ Excel file could not be read. Please check the file format.",
+    "unexpected_error": "❌ Unexpected error: {0}",
+    "analysis_error": "❌ An error occurred: {0}",
+    "check_logs": "Please check the log file: logs/taxonomy_app.log"
+  }
+}
