@@ -2,6 +2,8 @@
 
 NCBI accession numaralarına göre taksonomi bilgilerini otomatik olarak eşleştiren bir Streamlit uygulaması.
 
+Arayüz sekmeli hale getirildi: accession akışı ilk sekmede kalıyor, API key kendi sekmesinde yönetiliyor ve Advanced sekmesi Excel'den alınan accession sütununu önce önizleyip sonra batch olarak işliyor.
+
 ## 📋 İçindekiler
 
 - [Özellikler](#özellikler)
@@ -18,9 +20,10 @@ NCBI accession numaralarına göre taksonomi bilgilerini otomatik olarak eşleş
 - ✅ **Performans**: In-memory caching ile duplicate sorguları ortadan kaldırıyor
 - ✅ **Güvenilirlik**: Retry mekanizması (exponential backoff) ile hata toleransı
 - ✅ **Detaylı Logging**: Tüm işlemler log dosyasında kaydediliyor
-- ✅ **Paralel İşleme**: ThreadPoolExecutor ile hızlı batch processing
+- ✅ **Batch-Öncelikli Accession Akışı**: accession değerleri batch ile çözülür, lineage bilgisi de batch alınır
 - ✅ **Hata Yönetimi**: Spesifik exception handling ile güvenli hata raporlama
 - ✅ **NCBI API Key Yükleme**: Arayüzden herhangi bir dosya yükle; proje klasöründe `ncbi_key.txt` olarak kaydedilir
+- ✅ **Sekmeli Arayüz**: Accession akışı ilk sekmede, API Key ayrı sekmede, Advanced sekmesi önizleme-öncelikli batch yardımcıları için
 - ✅ **Adaptif NCBI Throttle**: `429` gelince hız otomatik düşer
 - ✅ **Kalıcı Cache**: Taksonomi sonuçları çalışma arasında tekrar kullanılır
 
@@ -34,7 +37,7 @@ NCBI accession numaralarına göre taksonomi bilgilerini otomatik olarak eşleş
 
 ```bash
 # 1. Klasöre gir
-cd d:\Uysal\TaxoByAccession_App
+cd d:\Python Edna\TaxoByAccession
 
 # 2. Sanal ortam oluştur (önerilen)
 python -m venv venv
@@ -61,6 +64,8 @@ echo "YOUR_API_KEY_HERE" > ncbi_key.txt
 
 Dosya yoksa Streamlit arayüzünde yükleme alanı görünür. Dosya adı önemli değildir; yüklenen içerik proje klasöründe `ncbi_key.txt` olarak kaydedilir ve uygulama otomatik yeniden başlar.
 
+API key durumu artık ana akışta tekrar edilmez; sadece API Key sekmesinde gösterilir.
+
 ## 📖 Kullanım
 
 ### Uygulamayı Çalıştır
@@ -74,9 +79,11 @@ Uygulama otomatik olarak `http://localhost:8501` adresinde açılacak.
 ### Adımlar
 
 1. **Excel Dosyası Yükle**: Blast sonuç dosyanı seç (.xlsx)
-2. **Sütunları Tanımla**: Accession ve Scientific Name sütunlarını seç
+2. **Sütunları Tanımla**: Accession sütununu seç; istersen scientific name sütununu da bırak, böylece fallback yolu aktif kalır
 3. **Analizi Başlat**: "Analizi Başlat" butonuna tıkla
 4. **Sonuçları İndir**: Excel dosyası olarak sonuçları indir
+
+İlk sekme artık accession değerlerini önce batch olarak çözer. Accession bulunamazsa yalnızca o satır için scientific name fallback kullanılır.
 
 ### Örnek Dosya Formatı
 
@@ -209,6 +216,12 @@ Uygulama birden fazla dili destekler:
 - 🇬🇧 English
 
 Sağ taraftaki sidebar'dan dili seçerek değiştirebilirsin.
+
+Sekme başlıkları ve yardımcı metinler de seçilen dile göre değişir.
+
+Advanced sekmesinde Excel accession sütunu önce önizlenir, sonra bu önizleme batch olarak işlenir. Yapıştırmalı liste alanı alternatif olarak durur.
+
+429 ve bekleme davranışı tamamen bitmedi; ancak istek sayısı büyük ölçüde azaldığı için ana darboğaz artık bu değil.
 
 ## 📝 Geliştirmeler
 
