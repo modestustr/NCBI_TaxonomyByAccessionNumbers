@@ -1,4 +1,6 @@
 import streamlit as st
+import atexit
+import json
 import requests
 import pandas as pd
 import time
@@ -16,7 +18,10 @@ from typing import Optional, Dict, List, Tuple, Any
 from config_taxonomy import (
     get_ncbi_api_key, MAX_WORKERS, RATE_LIMIT_DELAY, REQUEST_RETRY_ATTEMPTS,
     REQUEST_RETRY_BACKOFF, NCBI_ENDPOINTS, NCBI_API_TIMEOUT, TAXONOMY_RANKS,
-    LOG_LEVEL, LOG_FILE, ENABLE_CACHE
+    LOG_LEVEL, LOG_FILE, ENABLE_CACHE, CACHE_MAX_SIZE, ENABLE_PERSISTENT_CACHE,
+    PERSISTENT_CACHE_FILE, NCBI_BASE_INTERVAL_WITH_KEY, NCBI_BASE_INTERVAL_NO_KEY,
+    NCBI_MAX_INTERVAL, NCBI_THROTTLE_GROWTH, NCBI_THROTTLE_DECAY,
+    NCBI_429_COOLDOWN_MULTIPLIER, save_ncbi_api_key_file
 )
 
 # Import translation system
@@ -24,6 +29,47 @@ from translations import initialize_translator, get_translator, set_language
 
 # --- LOGGING SETUP ---
 os.makedirs(os.path.dirname(LOG_FILE) if os.path.dirname(LOG_FILE) else ".", exist_ok=True)
+
+
+PERSISTENT_CACHE_PATH = os.path.join(os.path.dirname(__file__), PERSISTENT_CACHE_FILE)
+
+
+def _load_persistent_cache() -> Dict[str, Dict[str, Any]]:
+    if not ENABLE_CACHE or not ENABLE_PERSISTENT_CACHE:
+        return {}
+
+    try:
+        if not os.path.exists(PERSISTENT_CACHE_PATH):
+            return {}
+
+        with open(PERSISTENT_CACHE_PATH, "r", encoding="utf-8") as file_handle:
+            data = json.load(file_handle)
+
+        if isinstance(data, dict):
+            return {
+                str(func_name): value if isinstance(value, dict) else {}
+                for func_name, value in data.items()
+            }
+    except Exception as exc:
+        logger.debug(f"Failed to load persistent cache: {exc}")
+
+    return {}
+
+
+def _save_persistent_cache() -> None:
+    if not ENABLE_CACHE or not ENABLE_PERSISTENT_CACHE:
+        return
+
+    try:
+        os.makedirs(os.path.dirname(PERSISTENT_CACHE_PATH), exist_ok=True)
+        with open(PERSISTENT_CACHE_PATH, "w", encoding="utf-8") as file_handle:
+            json.dump(PERSISTENT_CACHE, file_handle, ensure_ascii=False)
+    except Exception as exc:
+        logger.debug(f"Failed to save persistent cache: {exc}")
+
+
+PERSISTENT_CACHE: Dict[str, Dict[str, Any]] = _load_persistent_cache()
+atexit.register(_save_persistent_cache)
 
 
 def _utf8_stream(stream):
@@ -50,6 +96,8 @@ logger = logging.getLogger(__name__)
 
 NCBI_REQUEST_LOCK = threading.Lock()
 NCBI_LAST_REQUEST_AT = 0.0
+NCBI_CURRENT_INTERVAL = NCBI_BASE_INTERVAL_WITH_KEY if get_ncbi_api_key() else NCBI_BASE_INTERVAL_NO_KEY
+NCBI_THROTTLE_COOLDOWN_UNTIL = 0.0
 
 
 def _normalize_value(value: Any) -> Optional[str]:
@@ -63,25 +111,69 @@ def _normalize_value(value: Any) -> Optional[str]:
     return text
 
 
+def _make_cache_key(func_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+    return json.dumps(
+        {
+            "func": func_name,
+            "args": args,
+            "kwargs": sorted(kwargs.items()),
+        },
+        default=str,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _register_throttle_success() -> None:
+    global NCBI_CURRENT_INTERVAL
+    NCBI_CURRENT_INTERVAL = max(
+        NCBI_BASE_INTERVAL_WITH_KEY if NCBI_API_KEY else NCBI_BASE_INTERVAL_NO_KEY,
+        NCBI_CURRENT_INTERVAL * NCBI_THROTTLE_DECAY,
+    )
+
+
+def _register_throttle_429(wait_hint: float | None = None) -> float:
+    global NCBI_CURRENT_INTERVAL, NCBI_THROTTLE_COOLDOWN_UNTIL
+
+    wait_time = wait_hint or 0.0
+    NCBI_CURRENT_INTERVAL = min(NCBI_MAX_INTERVAL, max(NCBI_CURRENT_INTERVAL * NCBI_THROTTLE_GROWTH, wait_time))
+    NCBI_THROTTLE_COOLDOWN_UNTIL = max(
+        NCBI_THROTTLE_COOLDOWN_UNTIL,
+        time.monotonic() + max(wait_time, NCBI_CURRENT_INTERVAL * NCBI_429_COOLDOWN_MULTIPLIER),
+    )
+    return NCBI_CURRENT_INTERVAL
+
+
 def _ncbi_request(url: str, *, params: Dict[str, Any], timeout: int):
     """Serialize NCBI requests so concurrent workers do not exceed API limits."""
     global NCBI_LAST_REQUEST_AT
 
-    min_interval = 0.12 if NCBI_API_KEY else 0.35
-
     with NCBI_REQUEST_LOCK:
-        elapsed = time.monotonic() - NCBI_LAST_REQUEST_AT
-        if elapsed < min_interval:
-            time.sleep(min_interval - elapsed)
+        now = time.monotonic()
+        next_allowed_at = max(NCBI_LAST_REQUEST_AT + NCBI_CURRENT_INTERVAL, NCBI_THROTTLE_COOLDOWN_UNTIL)
+        if now < next_allowed_at:
+            time.sleep(next_allowed_at - now)
 
         response = requests.get(url, params=params, timeout=timeout)
         NCBI_LAST_REQUEST_AT = time.monotonic()
+        if response.status_code == 429:
+            retry_after = response.headers.get("Retry-After")
+            retry_after_seconds = 0.0
+            if retry_after is not None:
+                try:
+                    retry_after_seconds = float(retry_after)
+                except ValueError:
+                    retry_after_seconds = 0.0
+            _register_throttle_429(retry_after_seconds)
+        else:
+            _register_throttle_success()
+
         return response
 
 # --- CACHING DECORATOR ---
 def cache_result(func):
     """Simple in-memory cache decorator with max size limit."""
-    cache = {}
+    cache = PERSISTENT_CACHE.setdefault(func.__name__, {})
     cache_stats = {"hits": 0, "misses": 0}
     
     @wraps(func)
@@ -89,7 +181,7 @@ def cache_result(func):
         if not ENABLE_CACHE:
             return func(*args, **kwargs)
         
-        key = (func.__name__, args, tuple(sorted(kwargs.items())))
+        key = _make_cache_key(func.__name__, args, kwargs)
         
         if key in cache:
             cache_stats["hits"] += 1
@@ -100,7 +192,7 @@ def cache_result(func):
         result = func(*args, **kwargs)
         
         # Implement max cache size
-        if len(cache) >= 1000:
+        if len(cache) >= CACHE_MAX_SIZE:
             first_key = next(iter(cache))
             del cache[first_key]
         
@@ -135,7 +227,7 @@ def retry_with_backoff(max_attempts: int = REQUEST_RETRY_ATTEMPTS, backoff: floa
                                 retry_after_seconds = float(retry_after) if retry_after is not None else 0.0
                             except ValueError:
                                 retry_after_seconds = 0.0
-                            wait_time = max(wait_time, retry_after_seconds, 2.0 * attempt)
+                            wait_time = max(wait_time, retry_after_seconds, _register_throttle_429(retry_after_seconds))
                         logger.warning(
                             f"{func.__name__} failed (attempt {attempt}/{max_attempts}). "
                             f"Retrying in {wait_time:.1f}s. Error: {str(e)[:100]}"
@@ -439,6 +531,21 @@ if NCBI_API_KEY:
 else:
     st.warning(t.t("app.api_key_not_found"))
     logger.warning("NCBI API key not found - rate limiting will apply")
+
+    uploaded_key_file = st.file_uploader(
+        "NCBI API key dosyası yükle",
+        type=None,
+        help="Dosya adı önemli değil. İçerik proje klasörüne ncbi_key.txt olarak kaydedilir.",
+    )
+    if uploaded_key_file is not None:
+        try:
+            saved_path = save_ncbi_api_key_file(uploaded_key_file.getvalue(), uploaded_key_file.name)
+            st.success(f"API key kaydedildi: {saved_path}")
+            logger.info(f"NCBI API key uploaded and saved as {saved_path}")
+            st.rerun()
+        except Exception as exc:
+            logger.error(f"Failed to save uploaded NCBI API key: {exc}", exc_info=True)
+            st.error(f"API key kaydedilemedi: {exc}")
 
 # File upload
 uploaded_file = st.file_uploader(t.t("upload.label"), type=["xlsx"])

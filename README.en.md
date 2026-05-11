@@ -20,6 +20,9 @@ A Streamlit application that automatically matches taxonomy information by NCBI 
 - ✅ **Detailed Logging**: All operations are recorded in log files
 - ✅ **Parallel Processing**: Fast batch processing with ThreadPoolExecutor
 - ✅ **Error Management**: Safe error reporting with specific exception handling
+- ✅ **NCBI API Key Upload**: Upload any key file in the UI; it is saved as `ncbi_key.txt`
+- ✅ **Adaptive NCBI Throttling**: Automatically slows down on `429` responses
+- ✅ **Persistent Cache**: Reuses cached taxonomy results across runs
 
 ## 🚀 Installation
 
@@ -55,6 +58,8 @@ Add an NCBI API key to increase query speed:
 ```bash
 echo "YOUR_API_KEY_HERE" > ncbi_key.txt
 ```
+
+If the file is missing, the Streamlit app will show an upload field. Any file name is accepted; the uploaded content is saved as `ncbi_key.txt` in the project folder and the app reloads automatically.
 
 ## 📖 Usage
 
@@ -93,6 +98,12 @@ MAX_WORKERS = 5  # Number of concurrent threads
 RATE_LIMIT_DELAY = 0.2  # Wait time between queries (seconds)
 REQUEST_RETRY_ATTEMPTS = 3  # Number of retries for failed requests
 REQUEST_RETRY_BACKOFF = 1.5  # Exponential backoff multiplier
+NCBI_BASE_INTERVAL_WITH_KEY = 0.12  # Base request spacing when key exists
+NCBI_BASE_INTERVAL_NO_KEY = 0.35  # Base request spacing without a key
+NCBI_MAX_INTERVAL = 4.0  # Upper bound for adaptive slowdown
+NCBI_THROTTLE_GROWTH = 1.6  # Slowdown multiplier after throttling
+NCBI_THROTTLE_DECAY = 0.995  # Recovery factor after successful requests
+NCBI_429_COOLDOWN_MULTIPLIER = 2.0  # Extra cooldown after a 429
 
 # --- LOGGING CONFIGURATION ---
 LOG_LEVEL = "INFO"  # Logging level (DEBUG, INFO, WARNING, ERROR)
@@ -100,6 +111,8 @@ LOG_LEVEL = "INFO"  # Logging level (DEBUG, INFO, WARNING, ERROR)
 # --- CACHE CONFIGURATION ---
 ENABLE_CACHE = True  # Enable/disable caching
 CACHE_MAX_SIZE = 1000  # Maximum cache size
+ENABLE_PERSISTENT_CACHE = True  # Keep cache across runs
+PERSISTENT_CACHE_FILE = "logs/ncbi_cache.json"  # Persistent cache location
 ```
 
 ### Environment Variables

@@ -41,6 +41,9 @@ streamlit run TaxoByAccesion_Streamlit.py
 - ✅ Detailed Logging / Detaylı Kayıt
 - ✅ Parallel Processing / Paralel İşleme
 - ✅ Multi-Language Support / Çoklu Dil Desteği (TR/EN)
+- ✅ NCBI API Key Upload / Arayüzden API key yükleme ve `ncbi_key.txt` olarak kaydetme
+- ✅ Adaptive NCBI Throttling / `429` gelince otomatik yavaşlama
+- ✅ Persistent Cache / Çalışmalar arasında cache'i koruma
 
 ## 📁 Documentation / Belgeler
 
@@ -54,6 +57,12 @@ streamlit run TaxoByAccesion_Streamlit.py
 The application supports Turkish and English. Switch languages using the sidebar selector.
 
 Uygulama Türkçe ve İngilizceyi destekliyor. Sidebar'dan dil seçerek değiştirebilirsin.
+
+## 🔑 NCBI API Key / NCBI API Anahtarı
+
+If `ncbi_key.txt` does not exist, the Streamlit UI shows an upload field. Any file name is accepted; the content is saved as `ncbi_key.txt` in the project folder and the app reloads automatically.
+
+`ncbi_key.txt` dosyası yoksa Streamlit arayüzünde yükleme alanı görünür. Dosya adı önemli değildir; içerik proje klasöründe `ncbi_key.txt` olarak kaydedilir ve uygulama otomatik yeniden başlar.
 
 ## 🔗 Faydalı Linkler
 

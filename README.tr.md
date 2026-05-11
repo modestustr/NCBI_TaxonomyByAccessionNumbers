@@ -20,6 +20,9 @@ NCBI accession numaralarına göre taksonomi bilgilerini otomatik olarak eşleş
 - ✅ **Detaylı Logging**: Tüm işlemler log dosyasında kaydediliyor
 - ✅ **Paralel İşleme**: ThreadPoolExecutor ile hızlı batch processing
 - ✅ **Hata Yönetimi**: Spesifik exception handling ile güvenli hata raporlama
+- ✅ **NCBI API Key Yükleme**: Arayüzden herhangi bir dosya yükle; proje klasöründe `ncbi_key.txt` olarak kaydedilir
+- ✅ **Adaptif NCBI Throttle**: `429` gelince hız otomatik düşer
+- ✅ **Kalıcı Cache**: Taksonomi sonuçları çalışma arasında tekrar kullanılır
 
 ## 🚀 Kurulum
 
@@ -55,6 +58,8 @@ API hızını artırmak için NCBI API anahtarı ekleyebilirsin:
 ```bash
 echo "YOUR_API_KEY_HERE" > ncbi_key.txt
 ```
+
+Dosya yoksa Streamlit arayüzünde yükleme alanı görünür. Dosya adı önemli değildir; yüklenen içerik proje klasöründe `ncbi_key.txt` olarak kaydedilir ve uygulama otomatik yeniden başlar.
 
 ## 📖 Kullanım
 
@@ -93,6 +98,12 @@ MAX_WORKERS = 5  # Eşzamanlı çalışacak thread sayısı
 RATE_LIMIT_DELAY = 0.2  # Sorgular arasında bekleme süresi (saniye)
 REQUEST_RETRY_ATTEMPTS = 3  # Başarısız istek kaç kez denenir
 REQUEST_RETRY_BACKOFF = 1.5  # Exponential backoff çarpanı
+NCBI_BASE_INTERVAL_WITH_KEY = 0.12  # API key varsa temel istek aralığı
+NCBI_BASE_INTERVAL_NO_KEY = 0.35  # API key yoksa temel istek aralığı
+NCBI_MAX_INTERVAL = 4.0  # Adaptif yavaşlamanın üst sınırı
+NCBI_THROTTLE_GROWTH = 1.6  # Throttle artış çarpanı
+NCBI_THROTTLE_DECAY = 0.995  # Başarılı isteklerde toparlanma oranı
+NCBI_429_COOLDOWN_MULTIPLIER = 2.0  # 429 sonrası ek bekleme çarpanı
 
 # --- LOGGING CONFIGURATION ---
 LOG_LEVEL = "INFO"  # Logging seviyesi (DEBUG, INFO, WARNING, ERROR)
@@ -100,6 +111,8 @@ LOG_LEVEL = "INFO"  # Logging seviyesi (DEBUG, INFO, WARNING, ERROR)
 # --- CACHE CONFIGURATION ---
 ENABLE_CACHE = True  # Caching aktif/pasif
 CACHE_MAX_SIZE = 1000  # Maksimum cache boyutu
+ENABLE_PERSISTENT_CACHE = True  # Cache'i çalışma arasında koru
+PERSISTENT_CACHE_FILE = "logs/ncbi_cache.json"  # Kalıcı cache dosyası
 ```
 
 ### Ortam Değişkenleri (Environment Variables)
