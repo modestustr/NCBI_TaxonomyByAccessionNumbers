@@ -16,8 +16,8 @@ NCBI_ENDPOINTS: dict = {
 }
 
 # --- PROCESSING CONFIGURATION ---
-MAX_WORKERS: int = 5
-RATE_LIMIT_DELAY: float = 0.2  # seconds between requests
+MAX_WORKERS: int = 2
+RATE_LIMIT_DELAY: float = 0.0  # global NCBI throttle handles request pacing
 REQUEST_RETRY_ATTEMPTS: int = 3
 REQUEST_RETRY_BACKOFF: float = 1.5  # exponential backoff multiplier
 

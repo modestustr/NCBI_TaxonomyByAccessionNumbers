@@ -7,6 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 import io
 import logging
 import os
+import sys
+import threading
 from functools import wraps
 from typing import Optional, Dict, List, Tuple, Any
 
@@ -22,15 +24,59 @@ from translations import initialize_translator, get_translator, set_language
 
 # --- LOGGING SETUP ---
 os.makedirs(os.path.dirname(LOG_FILE) if os.path.dirname(LOG_FILE) else ".", exist_ok=True)
+
+
+def _utf8_stream(stream):
+    """Return a text stream that can safely emit UTF-8 log messages on Windows."""
+    try:
+        stream.reconfigure(encoding="utf-8", errors="replace")
+        return stream
+    except Exception:
+        try:
+            return io.TextIOWrapper(stream.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+        except Exception:
+            return stream
+
+
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        logging.StreamHandler(_utf8_stream(sys.stderr))
     ]
 )
 logger = logging.getLogger(__name__)
+
+NCBI_REQUEST_LOCK = threading.Lock()
+NCBI_LAST_REQUEST_AT = 0.0
+
+
+def _normalize_value(value: Any) -> Optional[str]:
+    if pd.isna(value):
+        return None
+
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return None
+
+    return text
+
+
+def _ncbi_request(url: str, *, params: Dict[str, Any], timeout: int):
+    """Serialize NCBI requests so concurrent workers do not exceed API limits."""
+    global NCBI_LAST_REQUEST_AT
+
+    min_interval = 0.12 if NCBI_API_KEY else 0.35
+
+    with NCBI_REQUEST_LOCK:
+        elapsed = time.monotonic() - NCBI_LAST_REQUEST_AT
+        if elapsed < min_interval:
+            time.sleep(min_interval - elapsed)
+
+        response = requests.get(url, params=params, timeout=timeout)
+        NCBI_LAST_REQUEST_AT = time.monotonic()
+        return response
 
 # --- CACHING DECORATOR ---
 def cache_result(func):
@@ -82,6 +128,14 @@ def retry_with_backoff(max_attempts: int = REQUEST_RETRY_ATTEMPTS, backoff: floa
                     attempt += 1
                     if attempt < max_attempts:
                         wait_time = backoff ** (attempt - 1)
+                        status_code = getattr(getattr(e, "response", None), "status_code", None)
+                        if status_code == 429:
+                            retry_after = getattr(getattr(e, "response", None), "headers", {}).get("Retry-After")
+                            try:
+                                retry_after_seconds = float(retry_after) if retry_after is not None else 0.0
+                            except ValueError:
+                                retry_after_seconds = 0.0
+                            wait_time = max(wait_time, retry_after_seconds, 2.0 * attempt)
                         logger.warning(
                             f"{func.__name__} failed (attempt {attempt}/{max_attempts}). "
                             f"Retrying in {wait_time:.1f}s. Error: {str(e)[:100]}"
@@ -132,7 +186,7 @@ def get_taxonomy_by_name(name: str) -> Optional[str]:
         if NCBI_API_KEY:
             params["api_key"] = NCBI_API_KEY
         
-        response = requests.get(
+        response = _ncbi_request(
             NCBI_ENDPOINTS["esearch"],
             params=params,
             timeout=NCBI_API_TIMEOUT
@@ -186,7 +240,7 @@ def get_taxid_from_accession(accession: str) -> Optional[str]:
         if NCBI_API_KEY:
             params["api_key"] = NCBI_API_KEY
         
-        response = requests.get(
+        response = _ncbi_request(
             NCBI_ENDPOINTS["esummary"],
             params=params,
             timeout=NCBI_API_TIMEOUT
@@ -244,7 +298,7 @@ def get_lineage(taxid: str) -> Optional[Dict[str, Optional[str]]]:
         if NCBI_API_KEY:
             params["api_key"] = NCBI_API_KEY
         
-        response = requests.get(
+        response = _ncbi_request(
             NCBI_ENDPOINTS["efetch"],
             params=params,
             timeout=NCBI_API_TIMEOUT
@@ -298,15 +352,18 @@ def process_entry(entry: Tuple[str, str, int, int]) -> Dict[str, Any]:
         Dictionary with accession, name, lineage info, and verification method
     """
     accession, scientific_name, idx, total = entry
+    accession = _normalize_value(accession)
+    scientific_name = _normalize_value(scientific_name)
+    display_value = accession or scientific_name or "Bilinmiyor"
     
-    logger.info(f"Processing entry {idx}/{total}: {accession}")
+    logger.info(f"Processing entry {idx}/{total}: {display_value}")
     
     # Try accession first
-    taxid = get_taxid_from_accession(accession)
+    taxid = get_taxid_from_accession(accession) if accession else None
     method = "Accession"
     
     # Fall back to name search if accession fails
-    if not taxid:
+    if not taxid and scientific_name:
         taxid = get_taxonomy_by_name(scientific_name)
         method = "Name_Fuzzy"
         logger.debug(f"Fell back to name search for {accession}")
@@ -454,8 +511,8 @@ if uploaded_file:
                     tasks: List[Tuple[str, str, int, int]] = []
                     for i, (_, row) in enumerate(unique_entries.iterrows()):
                         tasks.append((
-                            str(row['Accession']),
-                            str(row['scientific_name_original']),
+                            row['Accession'],
+                            row['scientific_name_original'],
                             i + 1,
                             total_unique
                         ))
