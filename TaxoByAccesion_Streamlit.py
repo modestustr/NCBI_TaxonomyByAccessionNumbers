@@ -144,7 +144,7 @@ def _register_throttle_429(wait_hint: float | None = None) -> float:
     return NCBI_CURRENT_INTERVAL
 
 
-def _ncbi_request(url: str, *, params: Dict[str, Any], timeout: int):
+def _ncbi_request(url: str, *, params: Dict[str, Any], timeout: int, method: str = "get"):
     """Serialize NCBI requests so concurrent workers do not exceed API limits."""
     global NCBI_LAST_REQUEST_AT
 
@@ -154,7 +154,10 @@ def _ncbi_request(url: str, *, params: Dict[str, Any], timeout: int):
         if now < next_allowed_at:
             time.sleep(next_allowed_at - now)
 
-        response = requests.get(url, params=params, timeout=timeout)
+        if method.lower() == "post":
+            response = requests.post(url, data=params, timeout=timeout)
+        else:
+            response = requests.get(url, params=params, timeout=timeout)
         NCBI_LAST_REQUEST_AT = time.monotonic()
         if response.status_code == 429:
             retry_after = response.headers.get("Retry-After")
@@ -483,6 +486,222 @@ def process_entry(entry: Tuple[str, str, int, int]) -> Dict[str, Any]:
     
     return result
 
+
+def _classify_bulk_value(raw_value: str) -> Tuple[str, str]:
+    normalized_value = raw_value.strip().split()[0].strip().rstrip(",;|")
+    if normalized_value.isdigit():
+        return normalized_value, "taxid"
+
+    if any(character.isdigit() for character in normalized_value) and any(character.isalpha() for character in normalized_value):
+        return normalized_value, "accession"
+
+    return normalized_value, "name"
+
+
+def _detect_column_index(columns: List[str], preferred_names: List[str], fallback_index: int = 0) -> int:
+    normalized_columns = {str(column).strip().lower(): index for index, column in enumerate(columns)}
+
+    for preferred_name in preferred_names:
+        preferred_index = normalized_columns.get(preferred_name.lower())
+        if preferred_index is not None:
+            return preferred_index
+
+    for index, column_name in enumerate(columns):
+        lowered_name = str(column_name).strip().lower()
+        if any(preferred_name.lower() in lowered_name for preferred_name in preferred_names):
+            return index
+
+    return fallback_index
+
+
+def _chunked(values: List[str], size: int) -> List[List[str]]:
+    return [values[index:index + size] for index in range(0, len(values), size)]
+
+
+def get_taxids_from_accessions(accessions: List[str]) -> Dict[str, Optional[str]]:
+    lookup: Dict[str, Optional[str]] = {}
+    cleaned_accessions = []
+
+    for accession in accessions:
+        normalized_accession = _normalize_value(accession)
+        if normalized_accession:
+            cleaned_accessions.append(normalized_accession)
+
+    if not cleaned_accessions:
+        return lookup
+
+    for batch in _chunked(list(dict.fromkeys(cleaned_accessions)), 200):
+        params = {
+            "db": "nucleotide",
+            "id": ",".join(batch),
+            "retmode": "json",
+        }
+        if NCBI_API_KEY:
+            params["api_key"] = NCBI_API_KEY
+
+        response = _ncbi_request(
+            NCBI_ENDPOINTS["esummary"],
+            params=params,
+            timeout=NCBI_API_TIMEOUT,
+            method="post" if len(batch) > 100 else "get",
+        )
+        response.raise_for_status()
+
+        data = response.json().get("result", {})
+        for uid in data.get("uids", []):
+            record = data.get(uid, {})
+            taxid = record.get("taxid")
+            taxid_text = str(taxid) if taxid else None
+            caption = _normalize_value(record.get("caption"))
+            accession_version = _normalize_value(record.get("accessionversion"))
+
+            for key in {caption, accession_version, caption.split(".")[0] if caption else None, accession_version.split(".")[0] if accession_version else None}:
+                if key:
+                    lookup[key] = taxid_text
+
+    return lookup
+
+
+def get_lineages_from_taxids(taxids: List[str]) -> Dict[str, Dict[str, Optional[str]]]:
+    lookup: Dict[str, Dict[str, Optional[str]]] = {}
+    cleaned_taxids = []
+
+    for taxid in taxids:
+        normalized_taxid = _normalize_value(taxid)
+        if normalized_taxid:
+            cleaned_taxids.append(normalized_taxid)
+
+    if not cleaned_taxids:
+        return lookup
+
+    for batch in _chunked(list(dict.fromkeys(cleaned_taxids)), 200):
+        params = {
+            "db": "taxonomy",
+            "id": ",".join(batch),
+            "retmode": "xml",
+        }
+        if NCBI_API_KEY:
+            params["api_key"] = NCBI_API_KEY
+
+        response = _ncbi_request(
+            NCBI_ENDPOINTS["efetch"],
+            params=params,
+            timeout=NCBI_API_TIMEOUT,
+            method="post" if len(batch) > 100 else "get",
+        )
+        response.raise_for_status()
+
+        root = ET.fromstring(response.text)
+        for taxon in root.findall(".//Taxon"):
+            taxid_value = _normalize_value(taxon.findtext("TaxId"))
+            if not taxid_value:
+                continue
+
+            lineage_result: Dict[str, Optional[str]] = {rank: None for rank in TAXONOMY_RANKS}
+            for node in taxon.findall(".//LineageEx/Taxon"):
+                rank = node.findtext("Rank")
+                scientific_name = node.findtext("ScientificName")
+                if rank in lineage_result and scientific_name:
+                    lineage_result[rank] = scientific_name
+
+            species_name = taxon.findtext("ScientificName")
+            if species_name:
+                lineage_result["species"] = species_name
+
+            lookup[taxid_value] = lineage_result
+
+    return lookup
+
+
+def build_bulk_preview_rows(bulk_input: str) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    for index, raw_line in enumerate(bulk_input.splitlines(), start=1):
+        stripped_line = raw_line.strip()
+        if not stripped_line:
+            continue
+
+        normalized_value, entry_type = _classify_bulk_value(stripped_line)
+        rows.append(
+            {
+                t.t("advanced_tab.preview_column_index"): str(index),
+                t.t("advanced_tab.preview_column_raw"): stripped_line,
+                t.t("advanced_tab.preview_column_normalized"): normalized_value,
+                t.t("advanced_tab.preview_column_type"): t.t(f"advanced_tab.entry_type_{entry_type}"),
+            }
+        )
+
+    return rows
+
+
+def build_bulk_preview_rows_from_values(values: List[Any]) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    for index, raw_value in enumerate(values, start=1):
+        if pd.isna(raw_value):
+            continue
+
+        stripped_line = str(raw_value).strip()
+        if not stripped_line or stripped_line.lower() == "nan":
+            continue
+
+        normalized_value, entry_type = _classify_bulk_value(stripped_line)
+        rows.append(
+            {
+                t.t("advanced_tab.preview_column_index"): str(index),
+                t.t("advanced_tab.preview_column_raw"): stripped_line,
+                t.t("advanced_tab.preview_column_normalized"): normalized_value,
+                t.t("advanced_tab.preview_column_type"): t.t(f"advanced_tab.entry_type_{entry_type}"),
+            }
+        )
+
+    return rows
+
+
+def process_bulk_preview_row(row: Dict[str, str], idx: int, total: int) -> Dict[str, Any]:
+    normalized_value = row.get(t.t("advanced_tab.preview_column_normalized"), "")
+    entry_type = row.get(t.t("advanced_tab.preview_column_type"), "")
+    display_value = normalized_value or row.get(t.t("advanced_tab.preview_column_raw"), "") or "Bilinmiyor"
+
+    logger.info(f"Processing bulk entry {idx}/{total}: {display_value}")
+
+    accession_value: Optional[str] = None
+    scientific_name_value: Optional[str] = None
+    taxid_value: Optional[str] = None
+    verification_method = entry_type
+
+    if entry_type == t.t("advanced_tab.entry_type_taxid"):
+        taxid_value = normalized_value
+        verification_method = "Taxid"
+    elif entry_type == t.t("advanced_tab.entry_type_accession"):
+        accession_value = normalized_value
+        taxid_value = get_taxid_from_accession(accession_value) if accession_value else None
+        verification_method = "Accession"
+    else:
+        scientific_name_value = normalized_value
+        taxid_value = get_taxonomy_by_name(scientific_name_value) if scientific_name_value else None
+        verification_method = "Name_Fuzzy"
+
+    lineage = get_lineage(taxid_value) if taxid_value else None
+    time.sleep(RATE_LIMIT_DELAY)
+
+    result: Dict[str, Any] = {
+        t.t("advanced_tab.preview_column_index"): row.get(t.t("advanced_tab.preview_column_index"), str(idx)),
+        "Accession": accession_value,
+        "scientific_name_original": scientific_name_value,
+        "taxid": taxid_value,
+        "verification_method": verification_method,
+        "bulk_input_raw": row.get(t.t("advanced_tab.preview_column_raw"), ""),
+        "bulk_input_normalized": normalized_value,
+        "bulk_input_type": entry_type,
+    }
+
+    if lineage:
+        result.update(lineage)
+    else:
+        for rank in TAXONOMY_RANKS:
+            result.setdefault(rank, None)
+
+    return result
+
 # --- STREAMLIT UI ---
 # Initialize translator
 translator = initialize_translator()
@@ -517,178 +736,398 @@ with st.sidebar:
 # Get translator for easier access
 t = get_translator()
 
-# Set page title and main title
-st.title(t.t("app.title"))
-st.markdown("---")
+def render_analysis_tab() -> None:
+    st.subheader(t.t("processing.status_title"))
 
-# Log application start
-logger.info(t.t("app.log_started"))
+    if not NCBI_API_KEY:
+        st.warning(t.t("app.api_key_not_found"))
+        st.info(t.t("analysis.api_key_hint"))
 
-# Show API key status
-if NCBI_API_KEY:
-    st.success(t.t("app.api_key_found", NCBI_API_KEY[:5]))
-    logger.info("NCBI API key loaded successfully")
-else:
-    st.warning(t.t("app.api_key_not_found"))
-    logger.warning("NCBI API key not found - rate limiting will apply")
+    uploaded_file = st.file_uploader(t.t("upload.label"), type=["xlsx"], key="analysis_upload")
+    if not uploaded_file:
+        st.info(t.t("analysis.no_file_prompt"))
+        return
 
-    uploaded_key_file = st.file_uploader(
-        "NCBI API key dosyası yükle",
-        type=None,
-        help="Dosya adı önemli değil. İçerik proje klasörüne ncbi_key.txt olarak kaydedilir.",
-    )
-    if uploaded_key_file is not None:
-        try:
-            saved_path = save_ncbi_api_key_file(uploaded_key_file.getvalue(), uploaded_key_file.name)
-            st.success(f"API key kaydedildi: {saved_path}")
-            logger.info(f"NCBI API key uploaded and saved as {saved_path}")
-            st.rerun()
-        except Exception as exc:
-            logger.error(f"Failed to save uploaded NCBI API key: {exc}", exc_info=True)
-            st.error(f"API key kaydedilemedi: {exc}")
-
-# File upload
-uploaded_file = st.file_uploader(t.t("upload.label"), type=["xlsx"])
-
-if uploaded_file:
     try:
         logger.info(f"File uploaded: {uploaded_file.name}")
         df_original = pd.read_excel(uploaded_file)
-        
-        # Clean column names
         df_original.columns = [str(col).strip() for col in df_original.columns]
         all_columns = df_original.columns.tolist()
-        
-        logger.info(f"File loaded: {len(df_original)} rows, {len(df_original.columns)} columns")
-        
+
+        st.session_state["analysis_uploaded_df"] = df_original
+        st.session_state["analysis_uploaded_columns"] = all_columns
+        st.session_state["analysis_uploaded_name"] = uploaded_file.name
+
         with st.expander(t.t("upload.preview"), expanded=True):
-            col_info1, col_info2 = st.columns([1, 2])
-            with col_info1:
+            left, right = st.columns([1, 2])
+            with left:
                 st.write(f"**{t.t('upload.file_info_title')}**")
                 st.write(t.t("upload.total_rows", len(df_original)))
                 st.write(t.t("upload.total_columns", len(df_original.columns)))
-            with col_info2:
+            with right:
                 st.write(f"**{t.t('upload.column_names')}**")
                 st.code(", ".join(all_columns))
-            
-            st.dataframe(df_original.head(10), width='stretch')
+            st.dataframe(df_original.head(10), width="stretch")
 
-        # --- COLUMN MAPPING SECTION ---
         st.subheader(t.t("column_mapping.title"))
         st.info(t.t("column_mapping.info"))
-        
-        target_acc = "Accession"
-        target_name = "scientific_name_original"
-        
-        col_sel1, col_sel2 = st.columns(2)
-        
-        # Find default indices
-        def_acc_idx = all_columns.index(target_acc) if target_acc in all_columns else 0
-        def_name_idx = all_columns.index(target_name) if target_name in all_columns else (1 if len(all_columns) > 1 else 0)
-        
-        with col_sel1:
-            selected_acc_col = st.selectbox(t.t("column_mapping.accession_label"), options=all_columns, index=def_acc_idx)
-        with col_sel2:
-            selected_name_col = st.selectbox(t.t("column_mapping.name_label"), options=all_columns, index=def_name_idx)
+        accession_only_mode = st.checkbox(
+            t.t("analysis.accession_only_mode"),
+            value=True,
+            key="analysis_accession_only_mode",
+        )
+        if accession_only_mode:
+            st.caption(t.t("analysis.accession_only_hint"))
 
-        # Start processing
-        if st.button(t.t("processing.start_button")):
-            logger.info(f"Starting analysis with columns: {selected_acc_col}, {selected_name_col}")
-            
-            try:
-                # Rename columns to standard names
+        col_sel1, col_sel2 = st.columns(2)
+        def_acc_idx = _detect_column_index(all_columns, ["Accession", "accession", "acc", "accession number"], 0)
+        def_name_idx = _detect_column_index(all_columns, ["scientific_name_original", "scientific name", "scientific_name", "name"], 1 if len(all_columns) > 1 else 0)
+
+        with col_sel1:
+            selected_acc_col = st.selectbox(t.t("column_mapping.accession_label"), options=all_columns, index=def_acc_idx, key="analysis_acc_col")
+        if not accession_only_mode:
+            with col_sel2:
+                selected_name_col = st.selectbox(t.t("column_mapping.name_label"), options=all_columns, index=def_name_idx, key="analysis_name_col")
+        else:
+            selected_name_col = None
+
+        if st.button(t.t("processing.start_button"), key="analysis_start_button"):
+            if accession_only_mode:
+                df_working = df_original.rename(columns={selected_acc_col: "Accession"})
+                if "Accession" not in df_working.columns:
+                    raise KeyError("Accession column could not be created from the selected Excel column")
+                unique_entries = df_working[["Accession"]].drop_duplicates()
+            else:
                 df_working = df_original.rename(columns={
                     selected_acc_col: "Accession",
-                    selected_name_col: "scientific_name_original"
+                    selected_name_col: "scientific_name_original",
                 })
-                
-                unique_entries = df_working[['Accession', 'scientific_name_original']].drop_duplicates()
-                total_unique = len(unique_entries)
-                
-                logger.info(t.t("processing.unique_entries", total_unique))
-                
-                st.markdown(f"### {t.t('processing.status_title')}")
+                unique_entries = df_working[["Accession", "scientific_name_original"]].drop_duplicates()
+
+            total_unique = len(unique_entries)
+
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            accession_values = unique_entries["Accession"].tolist()
+
+            status_text.text(t.t("processing.processing_text", 1, total_unique, t.t("advanced_tab.excel_accession_preview_button")))
+            taxid_lookup = get_taxids_from_accessions(accession_values)
+            progress_bar.progress(0.5)
+
+            if accession_only_mode:
+                lineage_lookup = get_lineages_from_taxids(list(dict.fromkeys(taxid for taxid in taxid_lookup.values() if taxid)))
+                progress_bar.progress(1.0)
+
+                results: List[Dict[str, Any]] = []
+                for accession_value in accession_values:
+                    normalized_accession = _normalize_value(accession_value)
+                    if not normalized_accession:
+                        continue
+
+                    taxid_value = taxid_lookup.get(normalized_accession) or taxid_lookup.get(normalized_accession.split(".")[0])
+                    lineage = lineage_lookup.get(taxid_value) if taxid_value else None
+
+                    result: Dict[str, Any] = {
+                        "Accession": normalized_accession,
+                        "scientific_name_original": None,
+                        "verification_method": "Accession",
+                    }
+
+                    if lineage:
+                        result.update(lineage)
+                    else:
+                        for rank in TAXONOMY_RANKS:
+                            result[rank] = None
+
+                    results.append(result)
+
+                df_lookup = pd.DataFrame(results)
+                df_final = pd.merge(df_working, df_lookup, on=["Accession"], how="left")
+            else:
+                lookup_rows: List[Dict[str, Any]] = []
+                missing_rows: List[Tuple[str, str, int, int]] = []
+
+                for idx, (_, row) in enumerate(unique_entries.iterrows(), start=1):
+                    normalized_accession = _normalize_value(row["Accession"])
+                    scientific_name_original = _normalize_value(row["scientific_name_original"])
+                    if not normalized_accession:
+                        continue
+
+                    taxid_value = taxid_lookup.get(normalized_accession) or taxid_lookup.get(normalized_accession.split(".")[0])
+                    if taxid_value:
+                        lookup_rows.append({
+                            "Accession": normalized_accession,
+                            "scientific_name_original": scientific_name_original,
+                            "taxid": taxid_value,
+                            "verification_method": "Accession",
+                        })
+                    elif scientific_name_original:
+                        missing_rows.append((normalized_accession, scientific_name_original, idx, total_unique))
+
+                missing_results: List[Dict[str, Any]] = []
+                if missing_rows:
+                    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                        for idx, result in enumerate(executor.map(process_entry, missing_rows), start=1):
+                            missing_results.append(result)
+                            status_text.text(t.t("processing.processing_text", idx, len(missing_rows), result.get("scientific_name_original", "Bilinmiyor")))
+                            progress_bar.progress(0.5 + (idx / max(len(missing_rows), 1)) * 0.5)
+
+                if lookup_rows or missing_results:
+                    df_lookup = pd.DataFrame(lookup_rows + missing_results)
+                else:
+                    df_lookup = pd.DataFrame(columns=["Accession", "scientific_name_original", "taxid", "verification_method"])
+
+                if not df_lookup.empty:
+                    lineage_lookup = get_lineages_from_taxids(list(dict.fromkeys(taxid for taxid in df_lookup["taxid"].tolist() if taxid)))
+                    for row_index, row in df_lookup.iterrows():
+                        taxid_value = row.get("taxid")
+                        lineage = lineage_lookup.get(taxid_value) if taxid_value else None
+                        if lineage:
+                            for rank, value in lineage.items():
+                                df_lookup.at[row_index, rank] = value
+                        else:
+                            for rank in TAXONOMY_RANKS:
+                                if rank not in df_lookup.columns:
+                                    df_lookup[rank] = None
+
+                df_final = pd.merge(df_working, df_lookup, on=["Accession", "scientific_name_original"], how="left")
+
+            st.balloons()
+            st.success(t.t("processing.completed"))
+
+            st.markdown("---")
+            st.subheader(t.t("summary.title"))
+            summary_col1, summary_col2 = st.columns(2)
+            with summary_col1:
+                if "phylum" in df_final.columns:
+                    st.write(t.t("summary.phylum_distribution"))
+                    st.dataframe(df_final["phylum"].value_counts(), width="stretch")
+            with summary_col2:
+                if "class" in df_final.columns:
+                    st.write(t.t("summary.class_distribution"))
+                    st.dataframe(df_final["class"].value_counts(), width="stretch")
+
+            st.subheader(t.t("results.results_table"))
+            st.dataframe(df_final.head(20), width="stretch")
+
+            if accession_only_mode:
+                st.caption(t.t("analysis.accession_only_result_note"))
+
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                df_final.to_excel(writer, index=False, sheet_name="Taxonomy_Results")
+            st.download_button(
+                label=t.t("results.download_button"),
+                data=output.getvalue(),
+                file_name=t.t("results.download_filename"),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="analysis_download_button",
+            )
+
+    except pd.errors.ParserError as exc:
+        logger.error(f"Excel parse error: {exc}")
+        st.error(t.t("errors.parse_error"))
+    except Exception as exc:
+        logger.error(f"Unexpected error during file processing: {exc}", exc_info=True)
+        st.error(t.t("errors.unexpected_error", str(exc)))
+
+
+def render_api_key_tab() -> None:
+    st.subheader(t.t("api_key_tab.title"))
+    st.write(t.t("api_key_tab.description"))
+
+    if NCBI_API_KEY:
+        st.success(t.t("app.api_key_found", NCBI_API_KEY[:5]))
+    else:
+        st.warning(t.t("app.api_key_not_found"))
+
+    uploaded_key_file = st.file_uploader(
+        t.t("api_key_tab.upload_label"),
+        type=None,
+        help=t.t("api_key_tab.upload_help"),
+        key="api_key_upload",
+    )
+    if uploaded_key_file is not None:
+        saved_path = save_ncbi_api_key_file(uploaded_key_file.getvalue(), uploaded_key_file.name)
+        st.success(t.t("api_key_tab.saved", saved_path))
+        st.rerun()
+
+
+def render_advanced_tab() -> None:
+    st.subheader(t.t("advanced_tab.title"))
+    st.markdown(t.t("advanced_tab.description"))
+    st.info(
+        t.t(
+            "advanced_tab.settings",
+            MAX_WORKERS,
+            RATE_LIMIT_DELAY,
+            NCBI_BASE_INTERVAL_WITH_KEY,
+            NCBI_BASE_INTERVAL_NO_KEY,
+        )
+    )
+
+    uploaded_df = st.session_state.get("analysis_uploaded_df")
+    uploaded_columns = st.session_state.get("analysis_uploaded_columns", [])
+
+    with st.expander(t.t("advanced_tab.excel_accession_title"), expanded=True):
+        if uploaded_df is None or not uploaded_columns:
+            st.info(t.t("advanced_tab.excel_accession_no_source"))
+        else:
+            st.write(t.t("advanced_tab.excel_accession_description", st.session_state.get("analysis_uploaded_name", "")))
+            accession_columns = uploaded_columns
+            default_acc_index = _detect_column_index(accession_columns, ["Accession", "accession", "acc", "accession number"], 0)
+            selected_acc_col = st.selectbox(
+                t.t("advanced_tab.excel_accession_column_label"),
+                options=accession_columns,
+                index=default_acc_index,
+                key="advanced_excel_accession_column",
+            )
+
+            preview_state_key = "advanced_excel_accession_preview_rows"
+            preview_ready_key = "advanced_excel_accession_preview_ready"
+
+            if st.button(t.t("advanced_tab.excel_accession_preview_button"), key="advanced_excel_accession_preview_button"):
+                preview_values = uploaded_df[selected_acc_col].drop_duplicates().tolist()
+                preview_rows = build_bulk_preview_rows_from_values(preview_values)
+                st.session_state[preview_state_key] = preview_rows
+                st.session_state[preview_ready_key] = True
+
+                if not preview_rows:
+                    st.warning(t.t("advanced_tab.excel_accession_empty"))
+                else:
+                    st.success(t.t("advanced_tab.excel_accession_preview_result", len(preview_rows)))
+                    st.dataframe(pd.DataFrame(preview_rows), width="stretch")
+                    st.caption(t.t("advanced_tab.excel_accession_preview_caption"))
+
+            preview_rows = st.session_state.get(preview_state_key, [])
+            preview_ready = st.session_state.get(preview_ready_key, False)
+
+            if preview_ready and preview_rows:
+                if st.button(t.t("advanced_tab.bulk_run_button"), key="advanced_excel_accession_bulk_run_button"):
+                    total = len(preview_rows)
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+
+                    accession_values = [row.get(t.t("advanced_tab.preview_column_raw"), "") for row in preview_rows]
+                    status_text.text(t.t("advanced_tab.bulk_run_status", 1, total))
+                    taxid_lookup = get_taxids_from_accessions(accession_values)
+                    progress_bar.progress(0.5)
+
+                    unique_taxids = list(dict.fromkeys(taxid for taxid in taxid_lookup.values() if taxid))
+                    lineage_lookup = get_lineages_from_taxids(unique_taxids)
+
+                    results: List[Dict[str, Any]] = []
+                    for idx, row in enumerate(preview_rows, start=1):
+                        raw_accession = _normalize_value(row.get(t.t("advanced_tab.preview_column_raw"), ""))
+                        if not raw_accession:
+                            continue
+
+                        taxid_value = taxid_lookup.get(raw_accession) or taxid_lookup.get(raw_accession.split(".")[0])
+                        lineage = lineage_lookup.get(taxid_value) if taxid_value else None
+
+                        result: Dict[str, Any] = {
+                            t.t("advanced_tab.preview_column_index"): row.get(t.t("advanced_tab.preview_column_index"), str(idx)),
+                            "Accession": raw_accession,
+                            "scientific_name_original": None,
+                            "taxid": taxid_value,
+                            "verification_method": "Accession",
+                            "bulk_input_raw": row.get(t.t("advanced_tab.preview_column_raw"), ""),
+                            "bulk_input_normalized": raw_accession,
+                            "bulk_input_type": t.t("advanced_tab.entry_type_accession"),
+                        }
+
+                        if lineage:
+                            result.update(lineage)
+                        else:
+                            for rank in TAXONOMY_RANKS:
+                                result.setdefault(rank, None)
+
+                        results.append(result)
+                        status_text.text(t.t("advanced_tab.bulk_run_status", idx, total))
+                        progress_bar.progress(idx / total)
+
+                    df_final = pd.DataFrame(results)
+                    st.success(t.t("advanced_tab.bulk_run_completed", total))
+                    st.dataframe(df_final.head(50), width="stretch")
+
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                        df_final.to_excel(writer, index=False, sheet_name="Accession_Results")
+
+                    st.download_button(
+                        label=t.t("advanced_tab.bulk_download_button"),
+                        data=output.getvalue(),
+                        file_name=t.t("advanced_tab.bulk_download_filename"),
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="advanced_excel_accession_bulk_download_button",
+                    )
+
+            st.caption(t.t("advanced_tab.excel_accession_fallback_note"))
+
+    with st.expander(t.t("advanced_tab.bulk_preview_title"), expanded=False):
+        st.write(t.t("advanced_tab.bulk_preview_description"))
+        bulk_input = st.text_area(
+            t.t("advanced_tab.bulk_input_label"),
+            placeholder=t.t("advanced_tab.bulk_input_placeholder"),
+            height=160,
+            key="advanced_bulk_preview_input",
+        )
+
+        if st.button(t.t("advanced_tab.bulk_preview_button"), key="advanced_bulk_preview_button"):
+            preview_rows = build_bulk_preview_rows(bulk_input)
+            st.session_state["advanced_bulk_preview_rows"] = preview_rows
+            st.session_state["advanced_bulk_preview_ready"] = True
+
+            if not preview_rows:
+                st.warning(t.t("advanced_tab.bulk_preview_empty"))
+            else:
+                st.success(t.t("advanced_tab.bulk_preview_result", len(preview_rows)))
+                st.dataframe(pd.DataFrame(preview_rows), width="stretch")
+                st.caption(t.t("advanced_tab.bulk_preview_caption"))
+
+        preview_rows = st.session_state.get("advanced_bulk_preview_rows", [])
+        preview_ready = st.session_state.get("advanced_bulk_preview_ready", False)
+
+        if preview_ready and preview_rows:
+            if st.button(t.t("advanced_tab.bulk_run_button"), key="advanced_bulk_run_button"):
+                total = len(preview_rows)
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-                
                 results: List[Dict[str, Any]] = []
-                
-                # Process entries with ThreadPoolExecutor
-                with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                    tasks: List[Tuple[str, str, int, int]] = []
-                    for i, (_, row) in enumerate(unique_entries.iterrows()):
-                        tasks.append((
-                            row['Accession'],
-                            row['scientific_name_original'],
-                            i + 1,
-                            total_unique
-                        ))
-                    
-                    counter = 0
-                    for result in executor.map(process_entry, tasks):
-                        results.append(result)
-                        counter += 1
-                        current_name = result.get('scientific_name_original', 'Bilinmiyor')
-                        status_text.text(t.t("processing.processing_text", counter, total_unique, current_name))
-                        progress_bar.progress(counter / total_unique)
-                
-                logger.info(t.t("processing.success_log"))
-                
-                # Merge results
-                df_lookup = pd.DataFrame(results)
-                df_final = pd.merge(
-                    df_working,
-                    df_lookup,
-                    on=['Accession', 'scientific_name_original'],
-                    how='left'
-                )
-                
-                st.balloons()
-                st.success(t.t("processing.completed"))
-                
-                # Summary Report
-                st.markdown("---")
-                st.subheader(t.t("summary.title"))
-                summary_col1, summary_col2 = st.columns(2)
-                
-                with summary_col1:
-                    if 'phylum' in df_final.columns:
-                        phylum_counts = df_final['phylum'].value_counts()
-                        st.write(t.t("summary.phylum_distribution"))
-                        st.dataframe(phylum_counts, width='stretch')
-                
-                with summary_col2:
-                    if 'class' in df_final.columns:
-                        class_counts = df_final['class'].value_counts()
-                        st.write(t.t("summary.class_distribution"))
-                        st.dataframe(class_counts, width='stretch')
 
-                st.subheader(t.t("results.results_table"))
-                st.dataframe(df_final.head(20), width='stretch')
-                
-                # Download results
+                for idx, row in enumerate(preview_rows, start=1):
+                    results.append(process_bulk_preview_row(row, idx, total))
+                    status_text.text(t.t("advanced_tab.bulk_run_status", idx, total))
+                    progress_bar.progress(idx / total)
+
+                result_df = pd.DataFrame(results)
+                st.success(t.t("advanced_tab.bulk_run_completed", total))
+                st.dataframe(result_df, width="stretch")
+
                 output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    df_final.to_excel(writer, index=False, sheet_name='Taxonomy_Results')
-                processed_data = output.getvalue()
-                
+                with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                    result_df.to_excel(writer, index=False, sheet_name="Bulk_Taxonomy_Results")
+
                 st.download_button(
-                    label=t.t("results.download_button"),
-                    data=processed_data,
-                    file_name=t.t("results.download_filename"),
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    label=t.t("advanced_tab.bulk_download_button"),
+                    data=output.getvalue(),
+                    file_name=t.t("advanced_tab.bulk_download_filename"),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="advanced_bulk_download_button",
                 )
-                
-                logger.info("Analysis completed successfully")
-                
-            except Exception as e:
-                logger.error(f"Error during analysis: {str(e)}", exc_info=True)
-                st.error(t.t("errors.analysis_error", str(e)))
-                st.error(t.t("errors.check_logs"))
-    
-    except pd.errors.ParserError as e:
-        logger.error(f"Excel parse error: {str(e)}")
-        st.error(t.t("errors.parse_error"))
-    except Exception as e:
-        logger.error(f"Unexpected error during file processing: {str(e)}", exc_info=True)
-        st.error(t.t("errors.unexpected_error", str(e)))
+
+
+st.title(t.t("app.title"))
+st.markdown("---")
+logger.info(t.t("app.log_started"))
+
+tabs = st.tabs([t.t("tabs.analysis"), t.t("tabs.api_key"), t.t("tabs.advanced")])
+
+with tabs[0]:
+    render_analysis_tab()
+
+with tabs[1]:
+    render_api_key_tab()
+
+with tabs[2]:
+    render_advanced_tab()

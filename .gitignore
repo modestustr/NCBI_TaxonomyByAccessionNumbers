@@ -55,3 +55,6 @@ logs/*
 *_key.txt
 *_key.json
 *_secret.txt
+
+# Local workflow tracking
+WORKFLOW.md

@@ -2,6 +2,8 @@
 
 A Streamlit application that automatically matches taxonomy information by NCBI accession numbers.
 
+The interface is tabbed: the accession workflow comes first, API key upload lives in its own tab, and the Advanced tab now starts from an Excel accession column preview before running the batch.
+
 ## 📋 Table of Contents
 
 - [Features](#features)
@@ -18,9 +20,10 @@ A Streamlit application that automatically matches taxonomy information by NCBI 
 - ✅ **Performance**: In-memory caching eliminates duplicate queries
 - ✅ **Reliability**: Retry mechanism (exponential backoff) for fault tolerance
 - ✅ **Detailed Logging**: All operations are recorded in log files
-- ✅ **Parallel Processing**: Fast batch processing with ThreadPoolExecutor
+- ✅ **Batch-first Accession Flow**: accession IDs are resolved in batch calls, with taxonomy lineage fetched in batches as well
 - ✅ **Error Management**: Safe error reporting with specific exception handling
 - ✅ **NCBI API Key Upload**: Upload any key file in the UI; it is saved as `ncbi_key.txt`
+- ✅ **Tabbed UI**: Accession workflow first, dedicated API Key tab, Advanced tab for preview-first batch helpers
 - ✅ **Adaptive NCBI Throttling**: Automatically slows down on `429` responses
 - ✅ **Persistent Cache**: Reuses cached taxonomy results across runs
 
@@ -34,7 +37,7 @@ A Streamlit application that automatically matches taxonomy information by NCBI 
 
 ```bash
 # 1. Enter the directory
-cd d:\Uysal\TaxoByAccession_App
+cd d:\Python Edna\TaxoByAccession
 
 # 2. Create virtual environment (recommended)
 python -m venv venv
@@ -61,6 +64,8 @@ echo "YOUR_API_KEY_HERE" > ncbi_key.txt
 
 If the file is missing, the Streamlit app will show an upload field. Any file name is accepted; the uploaded content is saved as `ncbi_key.txt` in the project folder and the app reloads automatically.
 
+The API key status is shown only in the dedicated API Key tab, not in the main accession workflow.
+
 ## 📖 Usage
 
 ### Run the Application
@@ -74,9 +79,11 @@ The application will automatically open at `http://localhost:8501`.
 ### Steps
 
 1. **Upload Excel File**: Select your BLAST result file (.xlsx)
-2. **Define Columns**: Select Accession and Scientific Name columns
+2. **Define Columns**: Select the accession column, and optionally the scientific name column if you want the hybrid fallback path
 3. **Start Analysis**: Click the "Start Analysis" button
 4. **Download Results**: Download results as Excel file
+
+The first tab now batch-processes accession IDs first. If accession lookup does not resolve a row, the scientific name fallback remains available for that row.
 
 ### Example File Format
 
@@ -208,6 +215,12 @@ The application supports multiple languages:
 - 🇬🇧 English (English)
 
 Switch languages using the selector in the sidebar.
+
+The tab labels and helper text also follow the selected language.
+
+The Advanced tab now previews the selected Excel accession column first, then runs the batch from that preview. The pasted list area remains as an alternative input path.
+
+429 throttling is still handled, but the number of requests is much lower because accession and lineage lookups are now batched.
 
 ## 📝 Improvements
 
